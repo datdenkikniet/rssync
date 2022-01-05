@@ -3,3 +3,6 @@ edition = "2021"
 name = "rssync"
 version = "0.1.0"
 
+[dependencies]
+bitflags = "1.3"
+
