@@ -86,7 +86,7 @@ where
         message: &RsyncMessage<T>,
     ) -> Result<(), SendError> {
         if !self.is_multiplexed {
-            if let RsyncMessage::Data { length, data } = message {
+            if let RsyncMessage::Data { length: _, data } = message {
                 self.write.write(&data)?;
                 Ok(())
             } else {
@@ -107,7 +107,7 @@ where
     pub fn read_message(&mut self) -> Result<RsyncMessage<Vec<u8>>, ReceiveError> {
         if !self.is_multiplexed {
             let mut data = Vec::new();
-            self.read.read_to_end(&mut data);
+            self.read.read_to_end(&mut data)?;
             Ok(RsyncMessage::Data {
                 length: data.len(),
                 data,
@@ -120,7 +120,7 @@ where
             match tag {
                 0x00 => {
                     let mut data_bytes = vec![0; data as usize];
-                    self.read.read_exact(&mut data_bytes);
+                    self.read.read_exact(&mut data_bytes)?;
                     Ok(RsyncMessage::Data {
                         length: data as usize,
                         data: data_bytes,
@@ -146,6 +146,12 @@ where
             length: data.len(),
             data,
         })
+    }
+
+    pub fn read_int(&mut self) -> Result<i32, ReceiveError> {
+        let mut data = [0u8; 4];
+        self.read.read_exact(&mut data)?;
+        Ok(i32::from_le_bytes(data))
     }
 }
 

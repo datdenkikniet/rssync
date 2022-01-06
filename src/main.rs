@@ -6,6 +6,7 @@ use std::{
 };
 
 use file_list::File;
+use file_mode::FileType;
 use protocol::{ReceiveError, RsyncMessage, RsyncSocket, SendError};
 
 use crate::file_list::{FileFlags, NameType};
@@ -197,11 +198,7 @@ impl<'a> Rsync<'a> {
 
     fn send_module_list(&mut self) -> Result<(), RsyncError> {
         let value = "module_one\nmodule_two\nmodule_three\n".as_bytes();
-
-        self.socket.send_message(&RsyncMessage::Data {
-            length: value.len(),
-            data: value,
-        })?;
+        self.socket.send_data(value)?;
         Ok(())
     }
 
@@ -266,16 +263,72 @@ impl<'a> Rsync<'a> {
     fn read_message(&mut self) -> Result<RsyncMessage<Vec<u8>>, ReceiveError> {
         self.socket.read_message()
     }
+
+    fn receive_sums(&mut self) -> Result<Sums, RsyncError> {
+        let chunk_count = self.socket.read_int()?;
+        let block_length = self.socket.read_int()?;
+        let sum2_length = self.socket.read_int()?;
+        let remainder = self.socket.read_int()?;
+
+        if chunk_count < 0 {
+            return Err(RsyncError::Unsupported(
+                "Negative chunk count not supported",
+            ));
+        }
+
+        let mut sums = Sums::new(chunk_count as usize, block_length, remainder, sum2_length);
+        for _ in 0..chunk_count {
+            let sum1 = self.socket.read_int()?;
+            let sum2_data = [0u8; 4];
+        }
+
+        Ok(sums)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SumBuf {
+    offset: usize,
+    length: i32,
+    checksum: u32,
+    chain: i32,
+    flags: u16,
+    sum2: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+pub struct Sums {
+    total_file_length: usize,
+    sum_chunks: Vec<SumBuf>,
+    block_length: i32,
+    remainder: i32,
+    sum2_length: i32,
+}
+
+impl Sums {
+    fn new(capacity: usize, block_length: i32, remainder: i32, sum2_length: i32) -> Self {
+        Self {
+            total_file_length: 0,
+            sum_chunks: Vec::with_capacity(capacity),
+            block_length: 0,
+            remainder: 0,
+            sum2_length: 0,
+        }
+    }
 }
 
 fn main() -> Result<(), RsyncError> {
+    let mode = file_mode::Mode::new(0x1ED, 0xFFFFFFFF);
+    let mut mode_dir = mode.clone();
+    mode_dir.set_file_type(FileType::Directory);
+
     let file_list = vec![
         File {
             dirname: PathBuf::from("dot"),
             basename: PathBuf::from("."),
             modtime: 5,
             filelen: 420,
-            mode: 0x1ED,
+            mode: mode_dir,
             flags: FileFlags::empty(),
             name_type: NameType::DotDir,
         },
@@ -284,7 +337,7 @@ fn main() -> Result<(), RsyncError> {
             basename: PathBuf::from("base_name"),
             modtime: 5,
             filelen: 0xDEADBEEF,
-            mode: 0x1ED,
+            mode,
             flags: FileFlags::empty(),
             name_type: NameType::Normal,
         },

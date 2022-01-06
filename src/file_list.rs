@@ -1,8 +1,9 @@
 use std::{io::Write, os::unix::prelude::OsStrExt, path::PathBuf};
 
 use bitflags::bitflags;
+use file_mode::Mode;
 
-use crate::{RsyncError, Rsync};
+use crate::{Rsync, RsyncError};
 
 bitflags! {
   pub struct XferFlags: u32 {
@@ -28,11 +29,19 @@ bitflags! {
 }
 
 impl XferFlags {
-    pub fn for_file(file: &File) -> Self {
+    pub fn for_file(file: &File, _previous_file: Option<&File>) -> Self {
         let mut flags = Self::empty();
+
+        if file.get_full_name().as_os_str().len() > 255 {
+            todo!();
+        }
 
         if flags.is_empty() && !file.is_directory() {
             flags |= XferFlags::TOP_DIR;
+        }
+
+        if flags.bits() > 0xFF {
+            flags |= XferFlags::EXTENDED_FLAGS;
         }
 
         flags
@@ -107,7 +116,7 @@ pub struct File {
     pub basename: PathBuf,
     pub modtime: u32,
     pub filelen: u64,
-    pub mode: u32,
+    pub mode: Mode,
     pub flags: FileFlags,
     pub name_type: NameType,
 }
@@ -115,7 +124,7 @@ pub struct File {
 impl File {
     pub fn write_data_bytes(&self, buffer: &mut Vec<u8>) -> Result<(), RsyncError> {
         // Send xfer flags
-        XferFlags::for_file(self).write_data_bytes(buffer)?;
+        XferFlags::for_file(self, None).write_data_bytes(buffer)?;
 
         // File name length and file name
         let name = self.basename.as_os_str();
@@ -133,7 +142,7 @@ impl File {
         buffer.write(&self.modtime.to_le_bytes())?;
 
         // File(?) mode
-        buffer.write(&self.mode.to_le_bytes())?;
+        buffer.write(&self.mode.mode().to_le_bytes())?;
 
         Ok(())
     }

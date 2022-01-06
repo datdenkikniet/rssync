@@ -24,6 +24,8 @@ start_daemon
      |- send_file_entry
     |- write_end_of_flist
    |- send_files
+    |- receive_sums
+    
    |- read_final_goodbye
 
 Exchange is:
