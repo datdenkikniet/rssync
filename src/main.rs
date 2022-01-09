@@ -23,8 +23,9 @@ const VERSION: Version = Version {
 };
 
 pub struct Rsync<'a> {
-    socket: RsyncSocket<&'a TcpStream, &'a TcpStream>,
+    socket: RsyncSocket<'a>,
     checksum_seed: u32,
+    file_list: &'a Vec<File>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +123,7 @@ pub enum RsyncError {
     Unsupported(&'static str),
     Receive(ReceiveError),
     Send(SendError),
+    ReadBlockReqError,
 }
 
 impl From<std::io::Error> for RsyncError {
@@ -230,14 +232,14 @@ impl<'a> Rsync<'a> {
         buffer.write(&bytes[..byte_count]).ok();
     }
 
-    fn send_file_list(&mut self, file_list: &Vec<File>) -> Result<(), RsyncError> {
+    fn send_file_list(&mut self) -> Result<(), RsyncError> {
         let mut data = Vec::with_capacity(128);
-        for file in file_list.iter() {
+        for file in self.file_list.iter() {
             file.write_data_bytes(&mut data)?;
         }
         // Signal end of list
         data.push(0);
-        self.socket.send_data(data)?;
+        self.socket.send_data(&data)?;
         Ok(())
     }
 
@@ -256,19 +258,30 @@ impl<'a> Rsync<'a> {
             .send_data(self.checksum_seed.to_le_bytes().as_slice())?;
         Ok(())
     }
+
     fn start_multiplexing(&mut self) {
-        self.socket.set_multiplexed(true);
+        self.socket.set_multiplex_in(true);
+        self.socket.set_multiplex_out(true);
     }
 
-    fn read_message(&mut self) -> Result<RsyncMessage<Vec<u8>>, ReceiveError> {
+    fn read_message(&mut self) -> Result<RsyncMessage, ReceiveError> {
         self.socket.read_message()
     }
 
     fn receive_sums(&mut self) -> Result<Sums, RsyncError> {
         let chunk_count = self.socket.read_int()?;
-        let block_length = self.socket.read_int()?;
-        let sum2_length = self.socket.read_int()?;
-        let remainder = self.socket.read_int()?;
+        let mut sums = Sums::default();
+
+        println!("{}", chunk_count);
+
+        if chunk_count == 0 {
+            return Ok(sums);
+        }
+
+        sums.sum_chunks.reserve(chunk_count as usize);
+        sums.block_length = self.socket.read_int()?;
+        sums.sum2_length = self.socket.read_int()?;
+        sums.remainder = self.socket.read_int()?;
 
         if chunk_count < 0 {
             return Err(RsyncError::Unsupported(
@@ -276,13 +289,30 @@ impl<'a> Rsync<'a> {
             ));
         }
 
-        let mut sums = Sums::new(chunk_count as usize, block_length, remainder, sum2_length);
         for _ in 0..chunk_count {
             let sum1 = self.socket.read_int()?;
             let sum2_data = [0u8; 4];
         }
 
         Ok(sums)
+    }
+
+    fn send_ndx(&mut self) -> Result<(), RsyncError> {
+        self.socket.send_data([0].as_slice())?;
+        Ok(())
+    }
+
+    fn read_block_req(&mut self) -> Result<&'a File, RsyncError> {
+        let index = self.socket.read_int()?;
+        if index < 0 || index as usize > usize::MAX {
+            return Err(RsyncError::ReadBlockReqError);
+        }
+        let index = index as usize;
+        if let Some(block) = self.file_list.get(index) {
+            Ok(block)
+        } else {
+            Err(RsyncError::ReadBlockReqError)
+        }
     }
 }
 
@@ -305,11 +335,11 @@ pub struct Sums {
     sum2_length: i32,
 }
 
-impl Sums {
-    fn new(capacity: usize, block_length: i32, remainder: i32, sum2_length: i32) -> Self {
+impl Default for Sums {
+    fn default() -> Self {
         Self {
             total_file_length: 0,
-            sum_chunks: Vec::with_capacity(capacity),
+            sum_chunks: Vec::new(),
             block_length: 0,
             remainder: 0,
             sum2_length: 0,
@@ -318,7 +348,7 @@ impl Sums {
 }
 
 fn main() -> Result<(), RsyncError> {
-    let mode = file_mode::Mode::new(0x1ED, 0xFFFFFFFF);
+    let mode = file_mode::Mode::new(0o755, 0o777);
     let mut mode_dir = mode.clone();
     mode_dir.set_file_type(FileType::Directory);
 
@@ -336,7 +366,7 @@ fn main() -> Result<(), RsyncError> {
             dirname: PathBuf::from("dot"),
             basename: PathBuf::from("base_name"),
             modtime: 5,
-            filelen: 0xDEADBEEF,
+            filelen: 25,
             mode,
             flags: FileFlags::empty(),
             name_type: NameType::Normal,
@@ -347,10 +377,11 @@ fn main() -> Result<(), RsyncError> {
 
     loop {
         let incoming = socket.incoming().next().unwrap().unwrap();
-        let socket = RsyncSocket::new(&incoming, &incoming);
+        let socket = RsyncSocket::new(&incoming);
         let mut rsync = Rsync {
             socket,
             checksum_seed: 1,
+            file_list: &&file_list,
         };
         println!("Read init: {:?}", rsync.do_init()?);
         println!("Read query: {:?}", rsync.read_query());
@@ -362,8 +393,9 @@ fn main() -> Result<(), RsyncError> {
         rsync.start_multiplexing();
         let message = rsync.read_message()?;
         println!("Receive msg: {:?}", message);
-        println!("Send file list: {:?}", rsync.send_file_list(&file_list));
-        println!("Receive msg: {:?}", rsync.read_message());
+        println!("Send file list: {:?}", rsync.send_file_list());
+        println!("Receive exclusion list:  {:?}", rsync.read_message());
+        println!("Receive block req: {:?}", rsync.read_block_req());
 
         // println!("Send files: {:?}", rsyncd.send_files()?);
         // println!("Send exit: {:?}", rsyncd.send_exit()?);
